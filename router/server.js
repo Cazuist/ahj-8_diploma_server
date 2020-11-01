@@ -53,104 +53,140 @@ app.use(async (ctx, next) => {
 const server = http.createServer(app.callback()).listen(port);
 const wsServer = new WS.Server({server});
 
+let clients = [];
+const ScrollPull = 10;
+let currentTopTask = null;
+
 wsServer.on('connection', (ws, req) => {
+  clients.push(ws);
+
   ws.on('message', (msg) => {
     const request = JSON.parse(msg);
     const { method, data } = request;
-    let response = { method, };
+    const response = { method, };
+    response.data = {};
     const path = './router/data/messages.json';
-    
+    const restClients = clients.filter((client) => client != ws);    
+
     fs.readFile(path, (err, fd) => {    
       const decoder = new TextDecoder('utf-8');
       const str = decoder.decode(fd);
-      const state = JSON.parse(str);
-
-      if (method === 'newTask') {
-        state.tasks.push(data);
-        state.conditions.lastChange = data.timestamp;
-        const toFile = JSON.stringify(state);
-
-        fs.writeFile(path, toFile, () => {return;});
-        return;
-      }      
-
-      if (method === 'deleteTask') {
-        state.conditions.lastChange = data.lastChange;
-        state.tasks = state.tasks.filter((task) => task.id !== data.id); 
-        
-        const toFile = JSON.stringify(state);        
-        fs.writeFile(path, toFile, () => {return;});
-        return;       
-      }
-
-      if (method === 'editTask') {
-        state.conditions.lastChange = data.lastChange;
-        let id = state.tasks.findIndex((task) => task.id === data.id);
-        state.tasks[id] = data.task;
-        
-        const toFile = JSON.stringify(state);
-        fs.writeFile(path, toFile, () => {return;});
-        return;       
-      }
-
-      if (method === 'switchGeo') {
-        state.conditions.lastChange = data.lastChange;
-        state.conditions.geo = !state.conditions.geo;
-        
-        const toFile = JSON.stringify(state);
-        fs.writeFile(path, toFile, () => {return;});
-        return;       
-      }
-
-      if (method === 'switchFavorite') {
-        state.conditions.lastChange = data.lastChange;
-        const favTask = state.tasks.find((task) => task.id === data.id);
-        favTask.isFavorite = !favTask.isFavorite;
-
-        const toFile = JSON.stringify(state);
-        fs.writeFile(path, toFile, () => {return;});
-        return;       
-      }
-
-      if (method === 'switchPinnedOn') {
-        state.conditions.lastChange = data.lastChange;
-        state.conditions.pinnedTask = data.id;
-        state.tasks.find((task) => task.id === data.id).isPinned = true;               
-      
-        const toFile = JSON.stringify(state);
-        fs.writeFile(path, toFile, () => {return;});
-        return;       
-      }
-
-      if (method === 'switchPinnedOff') {
-        state.conditions.lastChange = data.lastChange;
-        state.conditions.pinnedTask = null;
-        
-        state.tasks.find(({ isPinned }) => isPinned).isPinned = false;               
-      
-        const toFile = JSON.stringify(state);
-        fs.writeFile(path, toFile, () => {return;});
-        return;       
-      }
+      const serverState = JSON.parse(str);
 
       if (method === 'getState') {
-        state.tasks = state.tasks.slice(-10);
-        response.data = state;
-        response.types = getTypesAmounts(state.tasks);
+        if (data.lastChange > serverState.conditions.lastChange) {
+          // логика при оффлайн поддержке
+          return;
+        }
+
+        response.data.types = getTypesAmounts(serverState.tasks);
+
+        if (clients.length === 1) {
+          serverState.tasks = serverState.tasks.slice(-ScrollPull);
+          currentTopTask = serverState.tasks.length - ScrollPull;
+        } else {
+          serverState.tasks = serverState.tasks.slice(currentTopTask);
+        }
+       
+        response.data.state = serverState;        
+        ws.send(JSON.stringify(response));
+        return;
       }
 
       if (method === 'scrollTasks') {
         const id = data.id;
-        const idxTo = state.tasks.findIndex((task) => task.id === id);
+        const idxTo = serverState.tasks.findIndex((task) => task.id === id);
 
         if(!idxTo) return;
         
-        const idxFrom = idxTo - 10 >= 0 ? idxTo - 10 : 0;
-        const newSlice = state.tasks.slice(idxFrom, idxTo);
+        currentTopTask = idxTo - ScrollPull >= 0 ? idxTo - ScrollPull : 0;
+        const newSlice = serverState.tasks.slice(currentTopTask, idxTo);
         response.data = newSlice;
+        ws.send(JSON.stringify(response));
+        restClients.forEach((client) => client.send(JSON.stringify(response)));
+        return;
       }
 
-      ws.send(JSON.stringify(response));
+      if (method === 'newTask') {
+        serverState.tasks.push(data);        
+        serverState.conditions.lastChange = data.timestamp;
+        response.data.newTask = data;
+
+        const toFile = JSON.stringify(serverState);
+        fs.writeFile(path, toFile, () => {});
+
+        restClients.forEach((client) => client.send(JSON.stringify(response)));
+        return;
+      }
+
+      serverState.conditions.lastChange = data.lastChange;
+      response.data = data;
+
+      if (method === 'deleteTask') {
+        serverState.tasks = serverState.tasks.filter((task) => task.id !== data.id);        
+        restClients.forEach((client) => client.send(JSON.stringify(response)));
+
+        const toFile = JSON.stringify(serverState);        
+        fs.writeFile(path, toFile, () => {});
+        return;       
+      }
+
+      if (method === 'switchGeo') {
+        serverState.conditions.geo = !serverState.conditions.geo;       
+        restClients.forEach((client) => client.send(JSON.stringify(response)));
+
+        const toFile = JSON.stringify(serverState);
+        fs.writeFile(path, toFile, () => {});
+        return;       
+      }
+
+      if (method === 'switchFavorite') {
+        const favTask = serverState.tasks.find((task) => task.id === data.id);
+        favTask.isFavorite = !favTask.isFavorite;         
+        restClients.forEach((client) => client.send(JSON.stringify(response)));
+
+        const toFile = JSON.stringify(serverState);
+        fs.writeFile(path, toFile, () => {});
+        return;       
+      }
+
+      if (method === 'editTask') {
+        let id = serverState.tasks.findIndex((task) => task.id === data.id);
+        serverState.tasks[id] = data.task;
+        restClients.forEach((client) => client.send(JSON.stringify(response)));
+        
+        const toFile = JSON.stringify(serverState);
+        fs.writeFile(path, toFile, () => {});
+        return;       
+      }
+
+      if (method === 'switchPinnedOn') {       
+        serverState.conditions.pinnedTask = data.id;
+        serverState.tasks.find((task) => task.id === data.id).isPinned = true;     
+        restClients.forEach((client) => client.send(JSON.stringify(response))); 
+
+        const toFile = JSON.stringify(serverState);
+        fs.writeFile(path, toFile, () => {});
+        return;       
+      }
+
+      if (method === 'switchPinnedOff') {
+        serverState.conditions.pinnedTask = null;        
+        serverState.tasks.find(({ isPinned }) => isPinned).isPinned = false;        
+        restClients.forEach((client) => client.send(JSON.stringify(response)));
+
+        const toFile = JSON.stringify(serverState);
+        fs.writeFile(path, toFile, () => {});
+        return;       
+      }  
     });
+  });
+
+  ws.on('close', () => {
+    clients = clients.filter((client) => client !== ws);
+
+    if (!clients.length) {
+      let currentTopTask = null;
+    }
   });
 });
