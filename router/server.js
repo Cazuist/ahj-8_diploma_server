@@ -55,7 +55,8 @@ const wsServer = new WS.Server({server});
 
 let clients = [];
 const ScrollPull = 10;
-let currentTopTask = null;
+//let currentTopTask = null;
+const pathToBD = './router/data/messages.json';
 
 wsServer.on('connection', (ws, req) => {
   clients.push(ws);
@@ -64,14 +65,14 @@ wsServer.on('connection', (ws, req) => {
     const request = JSON.parse(msg);
     const { method, data } = request;
     const response = { method, };
-    response.data = {};
-    const path = './router/data/messages.json';
-    const restClients = clients.filter((client) => client != ws);    
+    response.data = {};    
+    const restClients = clients.filter((client) => client != ws);
 
-    fs.readFile(path, (err, fd) => {    
+    fs.readFile(pathToBD, (err, fd) => {    
       const decoder = new TextDecoder('utf-8');
       const str = decoder.decode(fd);
       const serverState = JSON.parse(str);
+      let tasks;
 
       if (method === 'getState') {
         if (data.lastChange > serverState.conditions.lastChange) {
@@ -79,41 +80,58 @@ wsServer.on('connection', (ws, req) => {
           return;
         }
 
-        response.data.types = getTypesAmounts(serverState.tasks);
+        const pinnedID = serverState.conditions.pinnedTask;
+        const pinnedTask = serverState.tasks.find((task) => task.id === pinnedID);
+        response.data.types = getTypesAmounts(serverState.tasks);        
 
         if (clients.length === 1) {
-          serverState.tasks = serverState.tasks.slice(-ScrollPull);
-          currentTopTask = serverState.tasks.length - ScrollPull;
+          tasks = serverState.tasks.slice(-ScrollPull);
+
+          if (pinnedTask && !tasks.includes(pinnedTask) ) {
+            tasks.unshift(pinnedTask);
+          }
+
+          tasks.forEach((task) => task.loaded = true);         
+          const toFile = JSON.stringify(serverState);
+          fs.writeFile(pathToBD, toFile, () => {});
         } else {
-          serverState.tasks = serverState.tasks.slice(currentTopTask);
+          tasks = serverState.tasks.filter(({ loaded }) => loaded);
         }
-       
-        response.data.state = serverState;        
+
+        response.data.state = {
+          conditions: serverState.conditions,
+          tasks,
+          info: serverState.info,
+        };
         ws.send(JSON.stringify(response));
         return;
       }
 
       if (method === 'scrollTasks') {
-        const id = data.id;
-        const idxTo = serverState.tasks.findIndex((task) => task.id === id);
 
-        if(!idxTo) return;
+        tasks = serverState.tasks
+          .filter(({ loaded }) => !loaded)
+          .slice(-ScrollPull);
+
+        if(!tasks.length) return;
         
-        currentTopTask = idxTo - ScrollPull >= 0 ? idxTo - ScrollPull : 0;
-        const newSlice = serverState.tasks.slice(currentTopTask, idxTo);
-        response.data = newSlice;
+        response.data = tasks;
         ws.send(JSON.stringify(response));
         restClients.forEach((client) => client.send(JSON.stringify(response)));
+
+        tasks.forEach((task) => task.loaded = true);         
+        const toFile = JSON.stringify(serverState);
+        fs.writeFile(pathToBD, toFile, () => {});
         return;
       }
 
       if (method === 'newTask') {
-        serverState.tasks.push(data);        
+        serverState.tasks.push(data);
         serverState.conditions.lastChange = data.timestamp;
         response.data.newTask = data;
 
         const toFile = JSON.stringify(serverState);
-        fs.writeFile(path, toFile, () => {});
+        fs.writeFile(pathToBD, toFile, () => {});
 
         restClients.forEach((client) => client.send(JSON.stringify(response)));
         return;
@@ -123,11 +141,11 @@ wsServer.on('connection', (ws, req) => {
       response.data = data;
 
       if (method === 'deleteTask') {
-        serverState.tasks = serverState.tasks.filter((task) => task.id !== data.id);        
+        serverState.tasks = serverState.tasks.filter((task) => task.id !== data.id);
         restClients.forEach((client) => client.send(JSON.stringify(response)));
 
-        const toFile = JSON.stringify(serverState);        
-        fs.writeFile(path, toFile, () => {});
+        const toFile = JSON.stringify(serverState);
+        fs.writeFile(pathToBD, toFile, () => {});
         return;       
       }
 
@@ -136,7 +154,7 @@ wsServer.on('connection', (ws, req) => {
         restClients.forEach((client) => client.send(JSON.stringify(response)));
 
         const toFile = JSON.stringify(serverState);
-        fs.writeFile(path, toFile, () => {});
+        fs.writeFile(pathToBD, toFile, () => {});
         return;       
       }
 
@@ -146,7 +164,7 @@ wsServer.on('connection', (ws, req) => {
         restClients.forEach((client) => client.send(JSON.stringify(response)));
 
         const toFile = JSON.stringify(serverState);
-        fs.writeFile(path, toFile, () => {});
+        fs.writeFile(pathToBD, toFile, () => {});
         return;       
       }
 
@@ -156,37 +174,80 @@ wsServer.on('connection', (ws, req) => {
         restClients.forEach((client) => client.send(JSON.stringify(response)));
         
         const toFile = JSON.stringify(serverState);
-        fs.writeFile(path, toFile, () => {});
+        fs.writeFile(pathToBD, toFile, () => {});
         return;       
       }
 
       if (method === 'switchPinnedOn') {       
         serverState.conditions.pinnedTask = data.id;
-        serverState.tasks.find((task) => task.id === data.id).isPinned = true;     
+        serverState.tasks.find((task) => task.id === data.id).isPinned = true;
         restClients.forEach((client) => client.send(JSON.stringify(response))); 
 
         const toFile = JSON.stringify(serverState);
-        fs.writeFile(path, toFile, () => {});
+        fs.writeFile(pathToBD, toFile, () => {});
         return;       
       }
 
       if (method === 'switchPinnedOff') {
-        serverState.conditions.pinnedTask = null;        
-        serverState.tasks.find(({ isPinned }) => isPinned).isPinned = false;        
+        serverState.conditions.pinnedTask = null; 
+        serverState.info = [];       
+        serverState.tasks.find(({ isPinned }) => isPinned).isPinned = false;
         restClients.forEach((client) => client.send(JSON.stringify(response)));
 
         const toFile = JSON.stringify(serverState);
-        fs.writeFile(path, toFile, () => {});
+        fs.writeFile(pathToBD, toFile, () => {});
         return;       
       }  
+
+      if (method === 'showInfoPanel') {
+        const infoTasks = data.map((id) => serverState.tasks
+            .find((task) => task.id === id));
+
+        serverState.info = infoTasks;
+        
+        restClients.forEach((client) => client.send(JSON.stringify(response)));
+        const toFile = JSON.stringify(serverState);
+        fs.writeFile(pathToBD, toFile, () => {});
+        return;       
+      }  
+
+      if (method === 'closeInfoPanel') {
+        serverState.info = [];
+        
+        restClients.forEach((client) => client.send(JSON.stringify(response)));
+        const toFile = JSON.stringify(serverState);
+        fs.writeFile(pathToBD, toFile, () => {});
+        return;       
+      }
+
+      if (method === 'getFavorite') {
+        const favoriteTasks = serverState.tasks.filter(({ isFavorite }) => isFavorite);
+        serverState.info = favoriteTasks;
+        response.data.favorites = favoriteTasks;
+        
+        clients.forEach((client) => client.send(JSON.stringify(response)));
+        const toFile = JSON.stringify(serverState);
+        fs.writeFile(pathToBD, toFile, () => {});
+        return;       
+      }    
     });
   });
 
   ws.on('close', () => {
     clients = clients.filter((client) => client !== ws);
 
-    if (!clients.length) {
-      let currentTopTask = null;
-    }
+    if (clients.length) return;
+
+    const file = fs.readFileSync(pathToBD);
+    const decoder = new TextDecoder('utf-8');
+    const str = decoder.decode(file);
+    const serverState = JSON.parse(str);
+
+    serverState.tasks.forEach((task) => {
+      task.loaded = false;      
+    });
+
+    const toFile = JSON.stringify(serverState);
+    fs.writeFile(pathToBD, toFile, () => {});
   });
 });
